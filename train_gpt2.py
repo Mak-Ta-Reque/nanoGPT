@@ -142,6 +142,7 @@ class GPT(nn.Module):
                     sd[k].copy_(sd_hf[k])
 
         return model
-
+#------------------------------------------------------------------------------
 model = GPT.from_pretrained('gpt2')
 print("pass")
+# Continue from 30 min
