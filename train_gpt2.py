@@ -29,14 +29,14 @@ class CausalSelfAttention(nn.Module):
         q, k, v = qkv.split(self.n_embd, dim = 2) # one big tensor to three tensor 
         
         k = k.view(B, T, self.n_head, C// self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        k = q.view(B, T, self.n_head, C// self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        k = v.view(B, T, self.n_head, C// self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C// self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C// self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         att = att.masked_fill(self.bias[:, :, :T, : T] == 0, float('-inf'))
         att = F.softmax(att, dim=-1)
         y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = y.transpose(1, 2).contiguious().view(B, T, C)
+        y = y.transpose(1, 2).contiguous().view(B, T, C)
         # output projection 
         y = self.c_proj(y)
         return y
@@ -47,12 +47,12 @@ class MLP(nn.Module):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4*config.n_embd)
         self.gelu = nn.GELU(approximate='tanh')
-        self.c_proj = nn.Linear( 4*config.n_embd ,  config.n_embd)
+        self.c_proj = nn.Linear( 4 * config.n_embd ,  config.n_embd)
 
     def forward(self, x ):
         x = self.c_fc(x)
         x = self.gelu(x)
-        self.c_proj(x)
+        x = self.c_proj(x)
         return x
 
 
@@ -64,10 +64,10 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-        def forwward(self, x):
-            x = x + self.attn(self.ln_1(x))
-            x = x + self.mlp(self.ln_2(x))
-            return x
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
 
 
 @dataclass
@@ -76,7 +76,7 @@ class GPTConfig:
     vocab_size: int = 50257
     n_layer: int = 12 
     n_head: int = 12
-    n_embd: int = 786
+    n_embd: int = 768
 
 
 
@@ -94,6 +94,26 @@ class GPT(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+    
+    def forward(self, idx):
+        # idx has a shape (B, T) batch size, block_size/context length
+        B, T = idx.shape
+        assert T <= self.config.block_size, f"Cannaot forward of length {T}, block size  "
+        # forward the token and position embeddings
+        pos = torch.arange(0,T, dtype=torch.long, device=idx.device) # has shape T
+        pos_emb = self.transformer.wpe(pos) # postional embeding of shape (T, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (B, T, n_embd)
+        x = tok_emb + pos_emb # pos_embed brodcust to (B, T, n_embd) from (T, n_embd) then sum with tok_emb
+        # Final size is (B, T, n_embd)
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
+        logits = self.lm_head(x) # (B, T, vocab_size)
+        return logits
+
+
+
+
     @classmethod
     def from_pretrained(cls, model_type):
         """Loads pretrained GPT-2 model weights from huggingface"""
@@ -143,6 +163,44 @@ class GPT(nn.Module):
 
         return model
 #------------------------------------------------------------------------------
+number_return_sequences = 5
+max_length = 30
+
+
 model = GPT.from_pretrained('gpt2')
-print("pass")
-# Continue from 30 min
+model.eval()
+model.to('cuda')
+
+import tiktoken 
+enc = tiktoken.get_encoding('gpt2')
+tokens = enc.encode("Hello, I'm a language model,")
+tokens = torch.tensor(tokens, dtype=torch.long) # 8 tokes fromthe sentace 
+tokens = tokens.unsqueeze(0).repeat(number_return_sequences,1) # 5, 8
+x = tokens.to('cuda')
+
+# generate right now x is (B, T) where B = 5, T = 8
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size(1) < max_length:
+    with torch.no_grad():
+        logits = model(x) # B, T, vocab_size
+        logits = logits[:, -1, :] # (B, vocab-size)
+        # got the probabilities
+        probs = F.softmax(logits, dim=-1 )
+        # get prbablities
+        topk_probs, topk_indicies =  torch.topk(probs, 50, dim=-1) # (5, 50)
+        # Select top-k proababilits 
+        ix = torch.multinomial(topk_probs, 1) #(B, 1)
+        # gather the corresponding indecies
+        xcol = torch.gather(topk_indicies, -1, ix) # (B, 1)
+        x = torch.cat((x, xcol), dim=1)
+
+# print inducidual raws of output 
+for i in range(number_return_sequences):
+    tokens = x [ i , :max_length].tolist()
+    decoded = enc.decode(tokens)
+    print(">", decoded)
+
+
+# Continue from 42 min
