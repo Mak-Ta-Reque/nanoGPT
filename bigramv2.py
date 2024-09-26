@@ -7,12 +7,12 @@ batch_size = 64 # how many independent sequence will we process in parallel
 block_size = 50 # what is the maximum context length for prediction?
 max_iters = 5000
 eval_interval = 500 
-learning_rate = 4e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+learning_rate = 4e-3
+device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_layers = 6
-n_head = 6
-n_embed = 384
+n_layers = 20
+n_head = 60
+n_embed = 600
 dropout = 0.2
 
 #--------------------
@@ -47,6 +47,10 @@ def get_batch(split):
     y = torch.stack([data[i + 1 : i + block_size+1] for i in ix])
     return x, y
 
+def count_parameters(model: nn.Module) -> float:
+    total_params = sum(p.numel() for p in model.parameters())
+    return total_params / 1_000_000  # Convert to millions
+
 
 @torch.no_grad()
 def estimate_loss():
@@ -56,11 +60,36 @@ def estimate_loss():
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
+            X, Y = X.to(device), Y.to(device)
             logits, loss = model(X,Y)
             losses [k] = loss.item()
         out[split] = losses.mean()
         model.train()
     return out
+
+
+class GroupedConvLastDim(nn.Module):
+    def __init__(self, in_channels, out_channels, groups=1):
+        super(GroupedConvLastDim, self).__init__()
+        # Define a 1D convolution layer with grouped convolutions
+        self.conv1d = nn.Conv1d(in_channels=in_channels, 
+                                out_channels=out_channels, 
+                                kernel_size=1, 
+                                groups=groups, bias=False)  # Set groups to reduce the number of parameters
+
+    def forward(self, x):
+        # x is of shape (B, T, C)
+        
+        # Permute the input tensor to (B, C, T) for Conv1d
+        x = x.permute(0, 2, 1)  # (B, C, T)
+        
+        # Apply the grouped convolution along the last dimension
+        x = self.conv1d(x)  # (B, head_size, T)
+        
+        # Permute back to (B, T, head_size)
+        x = x.permute(0, 2, 1)  # (B, T, head_size)
+        
+        return x
     
 class Feedforward(nn.Module):
     """ A simple linear layer followed by a non-linearity """
@@ -105,6 +134,30 @@ class Head(nn.Module):
         self.key = nn.Linear(n_embed, head_size, bias=False)
         self.query = nn.Linear(n_embed, head_size, bias=False)
         self.value = nn.Linear(n_embed, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x):
+        B, T, C = x.shape
+        k = self.key(x) #(B, T, 16)
+        q = self.query(x) #(B, T, 16) 
+
+        wei = q @ k.transpose(-2, -1) * C**-0.5# (B, T , 16 ) @ (B, 16, T) -->  (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T]==0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
+        v = self.value(x)
+        out = wei @ v
+        return out
+    
+class HeadC(nn.Module):
+    """ ONe head size of self attention """
+    def __init__(self, head_size) -> None:
+        super().__init__()
+
+        self.key = GroupedConvLastDim(in_channels=n_embed, out_channels=head_size, groups=head_size)
+        self.query = GroupedConvLastDim(in_channels=n_embed, out_channels=head_size, groups=head_size)
+        self.value = GroupedConvLastDim(in_channels=n_embed, out_channels=head_size, groups=head_size)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
         self.dropout = nn.Dropout(dropout)
     
@@ -184,6 +237,7 @@ class Bigramlanguagemodel(nn.Module):
             targets = targets.view(B*T)
             loss = F.cross_entropy(logits, targets)
         return logits, loss
+    
     def generate(self, idx, max_new_tokens):
         # idx is (B, T) array of indices in the curren context
         
@@ -202,8 +256,11 @@ class Bigramlanguagemodel(nn.Module):
         
 model = Bigramlanguagemodel()
 m = model.to(device)
-
+total_params = count_parameters(model)
+print(f"Total parameters: {total_params}")
 # Create an optimizer
+
+
 optimizer = torch.optim.Adam(m.parameters(), lr=1e-3)
 
 
@@ -215,6 +272,7 @@ for iter in range (max_iters):
         losses = estimate_loss()
         print(f"Step {iter}: train loss {losses['train']:.4f} val loss {losses['val']:.4f}")
     xb, yb = get_batch("train")
+    xb, yb = xb.to(device), yb.to(device)
     #evaluate loss
     logits, loss = m(xb, yb)
     optimizer.zero_grad(set_to_none=True)
@@ -222,5 +280,7 @@ for iter in range (max_iters):
     optimizer.step()
 
 # generate from the model
-print(decode(m.generate(idx = torch.ones((1,1), dtype=torch.long), max_new_tokens=200)[0].tolist()))
-    
+print(decode(m.generate(idx = torch.ones((1,1), dtype=torch.long, device=device), max_new_tokens=200)[0].tolist()))
+
+total_params = count_parameters(model)
+print(f"Total parameters: {total_params}")
