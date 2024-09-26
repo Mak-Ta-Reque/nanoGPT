@@ -212,6 +212,7 @@ class DataLoaderLight:
     
 
 # auto detect gpu
+import time
 
 device = 'cpu'
 if torch.cuda.is_available():
@@ -228,22 +229,30 @@ if torch.cuda.is_available():
 #device = 'cpu'
 # Read it and inspect it 
 
-train_loader = DataLoaderLight(B=4, T=32)
-
+train_loader = DataLoaderLight(B=8, T=1024)
+torch.set_float32_matmul_precision('high')
 model =  GPT(GPTConfig())
 model.to(device)
+model = torch.compile(model)
 #logits, loss = model(x, y)
 
 optimizer = torch.optim.AdamW(model.parameters())
 
 for i in range(50):
+    t0 = time.time()
     x, y = train_loader.next_batch()
     x, y = x.to(device), y.to(device)
     optimizer.zero_grad()
-    logits, loss = model(x, y)
+    with torch.autocast(device_type=device, dtype=torch.float16):
+        logits, loss = model(x, y)
+        #import code; code.interact(local=locals())
     loss.backward()
     optimizer.step()
-    print(f"Step {i}, loss {loss.item()}")
+    torch.cuda.synchronize()
+    t1 = time.time()
+    dt = (t1 -t0 ) * 1000 # time difference in milisecond
+    tokens_per_sec = (train_loader.B * train_loader.T)/ (t1-t0)
+    print(f"Step {i}, loss {loss.item()}, dt: {dt: .2f}ms, tok/sec: {tokens_per_sec}")
 
     
 

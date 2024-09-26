@@ -4,15 +4,15 @@ from torch.nn import functional as F
 
 # hyperparameters
 batch_size = 64 # how many independent sequence will we process in parallel
-block_size = 50 # what is the maximum context length for prediction?
+block_size = 1024 # what is the maximum context length for prediction?
 max_iters = 5000
 eval_interval = 500 
 learning_rate = 4e-3
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_layers = 20
-n_head = 60
-n_embed = 600
+n_layers = 12
+n_head = 12
+n_embed = 768
 dropout = 0.2
 
 #--------------------
@@ -179,7 +179,7 @@ class MultiHeadAttention(nn.Module):
     """ multiple heads of self-attention in parellel """
     def __init__(self, num_heads, head_size) -> None:
         super().__init__()
-        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.heads = nn.ModuleList([HeadC(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(n_embed, n_embed)
         self.dropout = nn.Dropout(dropout)
     def forward(self, x):
