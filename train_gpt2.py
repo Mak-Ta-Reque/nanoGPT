@@ -7,7 +7,7 @@ import torch.backends.mps
 import torch.nn as nn
 from torch.nn import functional as F
 import torch.utils
-
+#from self_attention import MultiHeadAttention
 #---------------------------------------------------------------------------------------------------------
 
 class CausalSelfAttention(nn.Module):
@@ -68,6 +68,7 @@ class Block(nn.Module):
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
+        #self.attn = MultiHeadAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
