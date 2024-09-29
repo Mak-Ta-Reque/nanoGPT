@@ -222,7 +222,7 @@ class DataLoaderLight:
     def __init__(self, B, T) -> None:
         self.B = B
         self.T = T
-        with open("input.txt", 'r', encoding="utf-8") as f:
+        with open("sample.txt", 'r', encoding="utf-8") as f:
             text = f.read()
         enc = tiktoken.get_encoding('gpt2')
         tokens = enc.encode(text)
@@ -241,7 +241,3 @@ class DataLoaderLight:
         if self.current_position + (B * T) + 1 > len(self.tokens):
             self.current_position = 0
         return x, y
-    
-
-
-

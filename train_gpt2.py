@@ -212,6 +212,8 @@ class GPT(nn.Module):
         
         fuse_available =  'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fuse_available and 'cuda' in device
+        #use_fused = False
+        #import code; code.interact(local=locals())
         print(f"using fused AdamW:  {use_fused}")
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas= (0.9, 0.95), eps=1e-8, fused=use_fused )
 
@@ -261,8 +263,17 @@ if torch.cuda.is_available():
 #device = 'cpu'
 # Read it and inspect it 
 
-train_loader = DataLoaderLight(B=8, T=1024)
+total_batch_size = 524288 # 2**19 ~0.5M  batch size according to GPT paper, in counted in number of tokens
+B = 16 # micro batch size
+T = 1024 # sequence length
+assert total_batch_size % (B * T) == 0, "make sure total_batch_size is divisible by B*T"
+grad_accumulation_steps = total_batch_size // (B * T)
+print(f"Total desired batch size: {total_batch_size}")
+print(f"=> calculated gradient accumulation step: {grad_accumulation_steps}")
+
+train_loader = DataLoaderLight(B=B, T=T)
 torch.set_float32_matmul_precision('high')
+
 model =  GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model = torch.compile(model)
@@ -270,7 +281,7 @@ model = torch.compile(model)
 
 #lerning rate scheduler
 max_lr = 4e-4
-min_lr = max_lr *0.1
+min_lr = max_lr * 0.1
 warmup_steps = 10
 max_steps = 50
 
@@ -294,14 +305,18 @@ def get_lr(it):
 optimizer = model.configure_optimizer(weight_decay=0.1, learning_rate = 6e-4, device=device)
 
 for step in range(max_steps):
-    t0 = time.time()
-    x, y = train_loader.next_batch()
-    x, y = x.to(device), y.to(device)
+    t0 = time.time()     
     optimizer.zero_grad()
-    with torch.autocast(device_type=device, dtype=torch.float16):
-        logits, loss = model(x, y)
-        #import code; code.interact(local=locals())
-    loss.backward()
+    loss_accum = 0.0
+    loss = 0.0
+    for micro_steps in range(grad_accumulation_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type=device, dtype=torch.float16):
+            logits, loss = model(x, y)
+        loss = loss/ grad_accumulation_steps
+        loss_accum += loss.detach() 
+        loss.backward()
     norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
@@ -309,9 +324,10 @@ for step in range(max_steps):
     optimizer.step()
     torch.cuda.synchronize()
     t1 = time.time()
-    dt = (t1 -t0 ) * 1000 # time difference in milisecond
-    tokens_per_sec = (train_loader.B * train_loader.T)/ (t1-t0)
-    print(f"Step {step} | loss {loss.item()} | lr {lr: .4e}  | norm : {norm: .4f} |  dt: {dt: .2f}ms | tok/sec: {tokens_per_sec}")
+    dt = t1 -t0  # time difference in milisecond
+    token_processed =  train_loader.B * train_loader.T * grad_accumulation_steps
+    tokens_per_sec = token_processed  / dt
+    print(f"Step {step} | loss {loss_accum.item(): .6f} | lr {lr: .4e}  | norm : {norm: .4f} |  dt: {dt * 1000: .2f}ms | tok/sec: {tokens_per_sec}")
 
     
 
@@ -355,6 +371,3 @@ for i in range(number_return_sequences):
     tokens = x [ i , :max_length].tolist()
     decoded = enc.decode(tokens)
     print(">", decoded)
-
-
-# Continue from 2h:34 min
